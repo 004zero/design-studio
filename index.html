@@ -378,6 +378,7 @@
       <button class="ed-btn" id="ed-scale-down">➖ 縮小</button>
       <button class="ed-btn" id="ed-scale-up">➕ 拡大</button>
       <button class="ed-btn" id="ed-autofit" title="絵を検出して中央・標準サイズに揃える">📐 自動フィット</button>
+      <button class="ed-btn" id="ed-upscale" title="画像のピクセル数を2倍にして、輪郭を引き締めてくっきり拡大（書き出しの粗さ対策）">🔍 解像度アップ×2</button>
       <span class="lab" style="margin-left:10px">背景:</span>
       <button class="ed-btn" id="ed-bg-insert" title="画像を絵の後ろに敷く">🖼 画像を差し込む</button>
       <button class="ed-btn" id="ed-bg-ai" title="OpenAI APIで背景を生成（APIキーが必要・有料）">🎨 AIで背景を作る</button>
@@ -2548,7 +2549,7 @@ function openImageEditor(l){
   const im = getImg(l.src);
   const nw = im.naturalWidth || im.width, nh = im.naturalHeight || im.height;
   if (!nw){ toast('画像を読み込み中です。少し待ってもう一度どうぞ'); return; }
-  const scale = Math.min(1, 1800/Math.max(nw, nh));
+  const scale = Math.min(1, 3200/Math.max(nw, nh));
   const c = document.createElement('canvas');
   c.width = Math.max(1, Math.round(nw*scale));
   c.height = Math.max(1, Math.round(nh*scale));
@@ -3048,6 +3049,49 @@ function edAutoFit(){
   ed.ctx.clearRect(0, 0, w, h);
   ed.ctx.drawImage(tmp, 0, 0);
 }
+function edUpscale(){
+  if (!ed) return;
+  const MAX = 3200;
+  const w = ed.canvas.width, h = ed.canvas.height;
+  if (Math.max(w, h) >= MAX){ toast(`これ以上は上げられません（最大 ${MAX}px）`); return; }
+  edFloatCommit(); edSelClear(); edCropCancel(true);
+  edSaveHistory();
+  ed.scaleBase = null;
+  const f = Math.min(2, MAX/Math.max(w, h));
+  const nw = Math.round(w*f), nh = Math.round(h*f);
+  const tmp = document.createElement('canvas'); tmp.width = nw; tmp.height = nh;
+  const tc = tmp.getContext('2d');
+  tc.imageSmoothingEnabled = true; tc.imageSmoothingQuality = 'high';
+  tc.drawImage(ed.canvas, 0, 0, nw, nh);
+  const sharp = edUnsharp(tc.getImageData(0, 0, nw, nh), nw, nh, 0.45);
+  ed.canvas.width = nw; ed.canvas.height = nh;
+  ed.ctx.putImageData(sharp, 0, 0);
+  fitEdCanvas();
+  toast(`解像度アップ：${w}×${h} → ${nw}×${nh} 🔍`);
+}
+/* アンシャープマスク：拡大でぼやけた輪郭を引き締める（透明部分は無視して暗いフチが出ないように） */
+function edUnsharp(id, w, h, amount){
+  const src = id.data;
+  const out = new ImageData(new Uint8ClampedArray(src), w, h);
+  const d = out.data;
+  for (let y = 1; y < h-1; y++){
+    for (let x = 1; x < w-1; x++){
+      const i = (y*w+x)*4;
+      if (src[i+3] < 8) continue;
+      for (let c = 0; c < 3; c++){
+        let sum = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++){
+          for (let dx = -1; dx <= 1; dx++){
+            const j = i + (dy*w+dx)*4;
+            if (src[j+3] > 8){ sum += src[j+c]; n++; }
+          }
+        }
+        d[i+c] = src[i+c] + amount*(src[i+c] - sum/n);
+      }
+    }
+  }
+  return out;
+}
 function edDrawBehindCover(img){
   ed.scaleBase = null;
   const c = ed.ctx, cw = ed.canvas.width, ch = ed.canvas.height;
@@ -3299,6 +3343,7 @@ $('#ed-zoom-out').addEventListener('click', () => { if (ed){ ed.view.z = clamp(e
 $('#ed-zoom-reset').addEventListener('click', () => { if (ed){ ed.view.z = 1; ed.view.ox = 0; ed.view.oy = 0; applyEdView(); } });
 $('#ed-scale-down').addEventListener('click', () => edScale(0.9));
 $('#ed-scale-up').addEventListener('click', () => edScale(1.1));
+$('#ed-upscale').addEventListener('click', edUpscale);
 $('#ed-autofit').addEventListener('click', edAutoFit);
 $('#ed-bg-insert').addEventListener('click', () => $('#ed-bg-file').click());
 $('#ed-bg-file').addEventListener('change', e => {
