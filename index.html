@@ -3309,7 +3309,11 @@ async function decomposeLayer(l){
   toast(`🧩 ${newLayers.length}個のパーツに分解しました！まとめて選択中です（空白クリックで解除、個別クリックで1つ選択）`);
 }
 
-/* --- ▦ グリッド分割：4×4 などの格子状シートを等分割して1コマずつレイヤー化 --- */
+/* --- ▦ グリッド分割：4×4 などの格子状シートを1コマずつレイヤー化 ---
+   スマート分割（既定）：グリッドは「どのコマの絵か」の振り分けにだけ使い、
+   絵のかたまり（連結成分）はグリッド線をはみ出していても丸ごと切り出す。
+   各かたまりは「一番多くのピクセルが入っているコマ」に割り当てるので、
+   隣のコマから少し入り込んだツノ・マント等が切れたり混ざったりしない。 */
 async function gridSplitLayer(l){
   const spec = prompt('何分割しますか？「横x縦」で入力してください。\n例：4x4（16コマ）、2x4、8x8', '4x4');
   if (!spec) return;
@@ -3317,7 +3321,7 @@ async function gridSplitLayer(l){
   if (!m){ toast('「4x4」のように入力してください'); return; }
   const cols = +m[1], rows = +m[2];
   if (cols*rows < 2 || cols*rows > 100){ toast('分割数は2〜100コマにしてください'); return; }
-  const removeBg = confirm('各コマの白い背景を透明にしますか？\n（OK＝透明にする／キャンセル＝そのまま。消えすぎたら Ctrl+Z で戻せます）');
+  const smart = confirm('スマート分割にしますか？（おすすめ）\n\nOK＝絵がグリッド線を少しはみ出していても、コマごとに丸ごと切り出します（背景は透明になります）\nキャンセル＝ただの等分割（背景そのまま・はみ出した部分は切れます）');
   toast('▦ グリッド分割中…');
   await new Promise(r => setTimeout(r, 30));
   const im = getImg(l.src);
@@ -3329,32 +3333,12 @@ async function gridSplitLayer(l){
   const cc = c.getContext('2d', { willReadFrequently:true });
   cc.imageSmoothingQuality = 'high';
   cc.drawImage(im, 0, 0, w, h);
-  const newLayers = [];
-  for (let r = 0; r < rows; r++){
-    for (let col = 0; col < cols; col++){
-      const x0 = Math.round(col*w/cols), x1 = Math.round((col+1)*w/cols);
-      const y0 = Math.round(r*h/rows), y1 = Math.round((r+1)*h/rows);
-      const bw = x1-x0, bh = y1-y0;
-      const pc = document.createElement('canvas'); pc.width = bw; pc.height = bh;
-      const px = pc.getContext('2d', { willReadFrequently:true });
-      px.drawImage(c, x0, y0, bw, bh, 0, 0, bw, bh);
-      if (removeBg) gridTileRemoveBg(pc, px);
-      if (gridTileIsEmpty(px, bw, bh)) continue; // 何も描かれていないコマは飛ばす
-      const src = pc.toDataURL('image/png');
-      const cxr = (x0+x1)/2/w - 0.5, cyr = (y0+y1)/2/h - 0.5;
-      const off = rot2(cxr*l.w*(l.flipH ? -1 : 1), cyr*l.h*(l.flipV ? -1 : 1), l.rot);
-      const nl = Object.assign(baseLayer('image'), {
-        src, x: l.x+off.x, y: l.y+off.y,
-        w: bw/w*l.w, h: bh/h*l.h,
-        rot: l.rot, opacity: l.opacity, flipH: l.flipH, flipV: l.flipV,
-        radius: 0,
-        filters: { brightness:100, contrast:100, saturate:100, grayscale:0, sepia:0, blur:0, hue:0 },
-      });
-      imgCache.set(src, pc);
-      if (!assets.includes(src)) assets.push(src);
-      newLayers.push(nl);
-    }
+  let newLayers = null;
+  if (smart){
+    newLayers = gridSplitSmart(l, c, cols, rows);
+    if (!newLayers) toast('背景がうまく判定できなかったため、等分割で続けます（背景が均一な画像だとスマート分割できます）');
   }
+  if (!newLayers) newLayers = gridSplitPlain(l, c, cols, rows);
   if (!newLayers.length){ toast('分割できるコマが見つかりませんでした'); return; }
   const idx = state.layers.indexOf(l);
   state.layers.splice(idx, 1, ...newLayers);
@@ -3363,25 +3347,42 @@ async function gridSplitLayer(l){
   if (activeTab === 'image') buildSidePanel();
   toast(`▦ ${cols}×${rows} で ${newLayers.length}コマに分割しました！まとめて選択中です`);
 }
-/* コマ内の白背景を透明化（四隅の色を背景とみなし、外周から届く部分だけ消す＝絵の中の白は残る） */
-function gridTileRemoveBg(pc, px){
-  const w = pc.width, h = pc.height, N = w*h;
-  const id = px.getImageData(0, 0, w, h), d = id.data;
+/* 切り出した範囲を、元レイヤーの変形を反映した位置に画像レイヤーとして作る */
+function gridMakeLayer(l, w, h, pc, minX, minY, maxX, maxY){
+  const src = pc.toDataURL('image/png');
+  const cxr = (minX+maxX)/2/w - 0.5, cyr = (minY+maxY)/2/h - 0.5;
+  const off = rot2(cxr*l.w*(l.flipH ? -1 : 1), cyr*l.h*(l.flipV ? -1 : 1), l.rot);
+  const nl = Object.assign(baseLayer('image'), {
+    src, x: l.x+off.x, y: l.y+off.y,
+    w: pc.width/w*l.w, h: pc.height/h*l.h,
+    rot: l.rot, opacity: l.opacity, flipH: l.flipH, flipV: l.flipV,
+    radius: 0,
+    filters: { brightness:100, contrast:100, saturate:100, grayscale:0, sepia:0, blur:0, hue:0 },
+  });
+  imgCache.set(src, pc);
+  if (!assets.includes(src)) assets.push(src);
+  return nl;
+}
+/* スマート分割の本体。背景が判定できないときは null を返す */
+function gridSplitSmart(l, srcCanvas, cols, rows){
+  const w = srcCanvas.width, h = srcCanvas.height, N = w*h;
+  const d = srcCanvas.getContext('2d').getImageData(0, 0, w, h).data;
+  // 背景色 = 四隅の不透明ピクセルの平均（パーツに分解と同じ考え方）
   let br = 0, bg = 0, bb = 0, cnt = 0;
   for (const [x, y] of [[0,0],[w-1,0],[0,h-1],[w-1,h-1]]){
     const i = (y*w+x)*4;
     if (d[i+3] > 200){ br += d[i]; bg += d[i+1]; bb += d[i+2]; cnt++; }
   }
-  if (!cnt) return;
-  br /= cnt; bg /= cnt; bb /= cnt;
   const t2 = 40*40;
   const bgLike = new Uint8Array(N);
   for (let p = 0; p < N; p++){
     const i = p*4;
     if (d[i+3] < 8){ bgLike[p] = 1; continue; }
-    const dr = d[i]-br, dg = d[i+1]-bg, db = d[i+2]-bb;
+    if (!cnt) continue;
+    const dr = d[i]-br/cnt, dg = d[i+1]-bg/cnt, db = d[i+2]-bb/cnt;
     if (dr*dr+dg*dg+db*db <= t2) bgLike[p] = 1;
   }
+  // 外周から届く背景だけを除く（絵の中の白目・ハイライトは残す）
   const reached = new Uint8Array(N), stack = [];
   const push = (x, y) => {
     if (x < 0 || y < 0 || x >= w || y >= h) return;
@@ -3395,8 +3396,93 @@ function gridTileRemoveBg(pc, px){
     const p = stack.pop(); const x = p%w, y = (p/w)|0;
     push(x+1, y); push(x-1, y); push(x, y+1); push(x, y-1);
   }
-  for (let p = 0; p < N; p++) if (reached[p]) d[p*4+3] = 0;
-  px.putImageData(id, 0, 0);
+  const content = new Uint8Array(N);
+  let contentCnt = 0;
+  for (let p = 0; p < N; p++){ if (!reached[p]){ content[p] = 1; contentCnt++; } }
+  if (!contentCnt || contentCnt > N*0.95) return null;
+  // 連結成分ラベリング（膨張なし＝隣のコマの絵とくっつかない）
+  const label = new Int32Array(N).fill(-1);
+  let nLabels = 0;
+  const q = [];
+  for (let p0 = 0; p0 < N; p0++){
+    if (!content[p0] || label[p0] >= 0) continue;
+    const lab = nLabels++;
+    label[p0] = lab; q.length = 0; q.push(p0);
+    while (q.length){
+      const p = q.pop(); const x = p%w, y = (p/w)|0;
+      if (x+1 < w && content[p+1] && label[p+1] < 0){ label[p+1] = lab; q.push(p+1); }
+      if (x > 0 && content[p-1] && label[p-1] < 0){ label[p-1] = lab; q.push(p-1); }
+      if (y+1 < h && content[p+w] && label[p+w] < 0){ label[p+w] = lab; q.push(p+w); }
+      if (y > 0 && content[p-w] && label[p-w] < 0){ label[p-w] = lab; q.push(p-w); }
+    }
+  }
+  // 各かたまりを「一番多くのピクセルが入っているコマ」へ割り当て
+  const cells = cols*rows;
+  const counts = new Int32Array(nLabels*cells);
+  for (let p = 0; p < N; p++){
+    if (!content[p]) continue;
+    const x = p%w, y = (p/w)|0;
+    const cx = Math.min(cols-1, (x*cols/w)|0), cy = Math.min(rows-1, (y*rows/h)|0);
+    counts[label[p]*cells + cy*cols+cx]++;
+  }
+  const assign = new Int32Array(nLabels);
+  for (let lab = 0; lab < nLabels; lab++){
+    let best = 0, bestN = -1;
+    for (let cell = 0; cell < cells; cell++){
+      const n = counts[lab*cells+cell];
+      if (n > bestN){ bestN = n; best = cell; }
+    }
+    assign[lab] = best;
+  }
+  // コマごとの範囲を集計
+  const boxes = Array.from({ length:cells }, () => ({ minX:w, minY:h, maxX:-1, maxY:-1, count:0 }));
+  for (let p = 0; p < N; p++){
+    if (!content[p]) continue;
+    const bx = boxes[assign[label[p]]];
+    const x = p%w, y = (p/w)|0;
+    if (x < bx.minX) bx.minX = x; if (x > bx.maxX) bx.maxX = x;
+    if (y < bx.minY) bx.minY = y; if (y > bx.maxY) bx.maxY = y;
+    bx.count++;
+  }
+  // コマ順（上→下・左→右）に、割り当てられたかたまりだけを透過PNGへ
+  const minCount = Math.max(30, N*0.00005);
+  const newLayers = [];
+  for (let cell = 0; cell < cells; cell++){
+    const bx = boxes[cell];
+    if (bx.maxX < 0 || bx.count < minCount) continue; // 空のコマ
+    const bw = bx.maxX-bx.minX+1, bh = bx.maxY-bx.minY+1;
+    const pc = document.createElement('canvas'); pc.width = bw; pc.height = bh;
+    const px = pc.getContext('2d');
+    const out = px.createImageData(bw, bh); const od = out.data;
+    for (let y = bx.minY; y <= bx.maxY; y++) for (let x = bx.minX; x <= bx.maxX; x++){
+      const p = y*w+x;
+      if (content[p] && assign[label[p]] === cell){
+        const si = p*4, oi = ((y-bx.minY)*bw+(x-bx.minX))*4;
+        od[oi] = d[si]; od[oi+1] = d[si+1]; od[oi+2] = d[si+2]; od[oi+3] = d[si+3];
+      }
+    }
+    px.putImageData(out, 0, 0);
+    newLayers.push(gridMakeLayer(l, w, h, pc, bx.minX, bx.minY, bx.maxX, bx.maxY));
+  }
+  return newLayers;
+}
+/* 等分割（背景そのまま）。スマート分割できない画像用のフォールバック */
+function gridSplitPlain(l, srcCanvas, cols, rows){
+  const w = srcCanvas.width, h = srcCanvas.height;
+  const newLayers = [];
+  for (let r = 0; r < rows; r++){
+    for (let col = 0; col < cols; col++){
+      const x0 = Math.round(col*w/cols), x1 = Math.round((col+1)*w/cols);
+      const y0 = Math.round(r*h/rows), y1 = Math.round((r+1)*h/rows);
+      const bw = x1-x0, bh = y1-y0;
+      const pc = document.createElement('canvas'); pc.width = bw; pc.height = bh;
+      const px = pc.getContext('2d', { willReadFrequently:true });
+      px.drawImage(srcCanvas, x0, y0, bw, bh, 0, 0, bw, bh);
+      if (gridTileIsEmpty(px, bw, bh)) continue; // 何も描かれていないコマは飛ばす
+      newLayers.push(gridMakeLayer(l, w, h, pc, x0, y0, x1-1, y1-1));
+    }
+  }
+  return newLayers;
 }
 /* コマが実質空かどうか（不透明かつ四隅の背景色と違うピクセルがほぼ無い） */
 function gridTileIsEmpty(px, w, h){
