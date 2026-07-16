@@ -245,9 +245,16 @@
   #ed-sel-panel{ background:#eaf5ff; border:1px solid #c4e2ff; }
   #ed-float-panel{ background:#fff6e5; border:1px solid #ffe0a3; }
   #ed-crop-panel{ background:#eafbe7; border:1px solid #b9e6b0; }
+  #ed-stamp-panel{ background:#fff3e0; border:1px solid #ffd699; }
+  #ed-stamp-marker{
+    position:absolute; width:20px; height:20px; border:3px solid #f59e0b; border-radius:50%;
+    box-shadow:0 0 0 2px rgba(255,255,255,.95), inset 0 0 0 2px rgba(255,255,255,.95);
+    pointer-events:none; display:none; transform:translate(-50%,-50%); z-index:5;
+  }
   .ed-slider{ display:inline-flex; align-items:center; gap:5px; font-size:11.5px; color:#556; }
   .ed-slider input[type=range]{ width:90px; accent-color:var(--accent); }
   #ed-canvas-holder{
+    position:relative;
     height:50vh; min-height:250px; border:1px solid var(--line); border-radius:10px; overflow:hidden;
     display:flex; align-items:center; justify-content:center; touch-action:none;
     background:repeating-conic-gradient(#ececec 0% 25%, #fff 0% 50%) 50% / 18px 18px;
@@ -331,6 +338,7 @@
       <button class="ed-btn" data-edtool="eraser">🩹 消しゴム</button>
       <button class="ed-btn" data-edtool="pen">🖊 ペン</button>
       <button class="ed-btn" data-edtool="picker" title="画像をタップして色を拾う（拾うと自動でペンに切替）">💧 スポイト</button>
+      <button class="ed-btn" data-edtool="stamp" title="まず「コピー元」にしたい場所をタップ→そのあと透けている場所をなぞると、コピー元の色・模様がそのまま写ります">🐾 スタンプ</button>
       <button class="ed-btn" data-edtool="wand" title="クリックした場所と同じ色のつながったかたまりを自動で消す">🪄 自動選択</button>
       <button class="ed-btn" data-edtool="lasso" title="ぐるっと囲んだ範囲を消す">⭕ なげなわ</button>
       <button class="ed-btn" data-edtool="select" title="同じ色の範囲を選ぶ→コピー・色替え・削除">🎯 範囲選択</button>
@@ -369,6 +377,11 @@
       <span style="font-weight:700;color:#2e7d32">✂ トリミング範囲を指定しました</span>
       <button class="ed-btn primary" id="ed-crop-apply">✔ 切り取る</button>
       <button class="ed-btn" id="ed-crop-cancel">✕ やめる</button>
+    </div>
+    <div class="ed-sub" id="ed-stamp-panel">
+      <span style="font-weight:700;color:#b45309">🐾 スタンプ：</span>
+      <span id="ed-stamp-status">まず「コピー元」にしたい場所（きれいな毛や模様）をタップしてね</span>
+      <button class="ed-btn" id="ed-stamp-repick">📍 コピー元を選び直す</button>
     </div>
     <div class="ed-row">
       <span class="lab">🔍 表示ズーム（見た目だけ）:</span>
@@ -2659,12 +2672,16 @@ function openImageEditor(l){
          sel:null, selSnap:null, clip:null, floating:null, baseSnap:null, floDrag:null,
          lassoing:false, lassoPts:null, lassoSnap:null,
          cropping:false, cropRect:null, cropSnap:null,
-         scaleBase:null, scaleFactor:1 };
+         scaleBase:null, scaleFactor:1,
+         stampSrc:null, stampPick:false, stampOffset:null, stampSnap:null, stampBrush:null };
   const holder = $('#ed-canvas-holder');
   holder.innerHTML = '';
   holder.appendChild(c);
+  const mk = document.createElement('div');
+  mk.id = 'ed-stamp-marker';
+  holder.appendChild(mk);
   bindEdCanvas(c);
-  ['#ed-sel-panel','#ed-float-panel','#ed-crop-panel'].forEach(s => $(s).style.display = 'none');
+  ['#ed-sel-panel','#ed-float-panel','#ed-crop-panel','#ed-stamp-panel'].forEach(s => $(s).style.display = 'none');
   $('#ed-paste').disabled = true;
   setEdTool('eraser');
   $('#edit-modal').classList.add('open');
@@ -2684,6 +2701,7 @@ function fitEdCanvas(){
 }
 function applyEdView(){
   ed.canvas.style.transform = `translate(${ed.view.ox}px,${ed.view.oy}px) scale(${ed.view.z})`;
+  edUpdateStampMarker();
 }
 function setEdTool(t){
   if (!ed) return;
@@ -2692,6 +2710,24 @@ function setEdTool(t){
   ed.tool = t;
   document.querySelectorAll('[data-edtool]').forEach(b => b.classList.toggle('on', b.dataset.edtool === t));
   ed.canvas.style.cursor = t === 'hand' ? 'grab' : 'crosshair';
+  $('#ed-stamp-panel').style.display = t === 'stamp' ? 'flex' : 'none';
+  if (t === 'stamp') edStampStatus();
+  edUpdateStampMarker();
+}
+function edStampStatus(){
+  $('#ed-stamp-status').textContent = (ed && ed.stampSrc && !ed.stampPick)
+    ? 'なぞった場所に、コピー元（📍オレンジの丸）の色・模様が写ります'
+    : 'まず「コピー元」にしたい場所（きれいな毛や模様）をタップしてね';
+}
+function edUpdateStampMarker(){
+  const mk = document.getElementById('ed-stamp-marker');
+  if (!mk) return;
+  if (!ed || !ed.stampSrc || ed.tool !== 'stamp'){ mk.style.display = 'none'; return; }
+  const holder = $('#ed-canvas-holder');
+  const cr = ed.canvas.getBoundingClientRect(), hr = holder.getBoundingClientRect();
+  mk.style.display = 'block';
+  mk.style.left = (cr.left - hr.left + ed.stampSrc.x/ed.canvas.width*cr.width) + 'px';
+  mk.style.top = (cr.top - hr.top + ed.stampSrc.y/ed.canvas.height*cr.height) + 'px';
 }
 
 /* --- 履歴（キャンバスサイズ変更にも対応） --- */
@@ -2744,6 +2780,30 @@ function edDown(e){
       setEdTool('pen');
       toast('色を拾いました → 🖊ペンに切替');
     } else toast('そこは透明な部分です');
+    return;
+  }
+  if (ed.tool === 'stamp'){
+    const needPick = !ed.stampSrc || ed.stampPick ||
+      ed.stampSrc.x >= ed.canvas.width || ed.stampSrc.y >= ed.canvas.height;
+    if (needPick){
+      const d = ed.ctx.getImageData(px, py, 1, 1).data;
+      if (d[3] < 8){ toast('そこは透明な場所です。色や模様のある場所をタップしてね'); return; }
+      ed.stampSrc = { x:p.x, y:p.y };
+      ed.stampPick = false;
+      edStampStatus();
+      edUpdateStampMarker();
+      toast('📍 コピー元を覚えました。透けている場所をなぞってね');
+      return;
+    }
+    edSaveHistory(); ed.scaleBase = null;
+    ed.stampOffset = { dx: ed.stampSrc.x - p.x, dy: ed.stampSrc.y - p.y };
+    const s = document.createElement('canvas');
+    s.width = ed.canvas.width; s.height = ed.canvas.height;
+    s.getContext('2d').drawImage(ed.canvas, 0, 0);
+    ed.stampSnap = s;
+    ed.stampBrush = document.createElement('canvas');
+    ed.drawing = true; ed.last = p;
+    edStampStroke(p, p);
     return;
   }
   if (ed.tool === 'wand'){
@@ -2811,7 +2871,11 @@ function edMove(e){
     drawCropPreview();
     return;
   }
-  if (ed.drawing){ edStroke(ed.last, p); ed.last = p; }
+  if (ed.drawing){
+    if (ed.tool === 'stamp') edStampStroke(ed.last, p);
+    else edStroke(ed.last, p);
+    ed.last = p;
+  }
 }
 function edUp(e){
   if (!ed) return;
@@ -2855,6 +2919,31 @@ function edStroke(a, b){
   c.lineTo(b.x + (a.x === b.x && a.y === b.y ? 0.01 : 0), b.y);
   c.stroke();
   c.restore();
+}
+/* --- 🐾 スタンプ（コピー元の色・模様をなぞった場所に写す） --- */
+function edStampStroke(a, b){
+  const r = Math.max(2, (+$('#ed-size').value || 30) * ed.canvas.width/1024 / 2);
+  const dist = Math.hypot(b.x-a.x, b.y-a.y);
+  const n = Math.max(1, Math.ceil(dist/Math.max(1, r/2)));
+  for (let i = 0; i <= n; i++)
+    edStampDab(a.x + (b.x-a.x)*i/n, a.y + (b.y-a.y)*i/n, r);
+}
+function edStampDab(x, y, r){
+  const size = Math.ceil(r*2);
+  const t = ed.stampBrush;
+  t.width = size; t.height = size;
+  const tc = t.getContext('2d');
+  tc.drawImage(ed.stampSnap,
+    x + ed.stampOffset.dx - r, y + ed.stampOffset.dy - r, size, size,
+    0, 0, size, size);
+  /* フチをやわらかくして、写した跡が目立たないように */
+  const gr = tc.createRadialGradient(r, r, r*0.55, r, r, r);
+  gr.addColorStop(0, 'rgba(0,0,0,1)');
+  gr.addColorStop(1, 'rgba(0,0,0,0)');
+  tc.globalCompositeOperation = 'destination-in';
+  tc.fillStyle = gr;
+  tc.fillRect(0, 0, size, size);
+  ed.ctx.drawImage(t, x-r, y-r);
 }
 
 /* --- ✂ トリミング --- */
@@ -3695,6 +3784,13 @@ $('#ed-undo').addEventListener('click', edUndo);
 $('#ed-white-safe').addEventListener('click', () => edRemoveWhite('safe'));
 $('#ed-white-strong').addEventListener('click', () => edRemoveWhite('strong'));
 $('#ed-fix-holes').addEventListener('click', edFixHoles);
+$('#ed-stamp-repick').addEventListener('click', () => {
+  if (!ed) return;
+  ed.stampPick = true;
+  setEdTool('stamp');
+  edStampStatus();
+  toast('コピー元にしたい場所をタップしてね');
+});
 $('#ed-sel-copy').addEventListener('click', edSelCopy);
 $('#ed-sel-recolor').addEventListener('click', edSelRecolor);
 $('#ed-sel-fill').addEventListener('click', edSelFill);
