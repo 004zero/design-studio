@@ -241,6 +241,15 @@
   .ed-btn.primary{ background:linear-gradient(90deg,var(--accent),var(--accent2)); border:none; color:#fff; font-weight:700; }
   .ed-btn.primary:hover{ opacity:.88; background:linear-gradient(90deg,var(--accent),var(--accent2)); }
   .ed-btn:disabled{ opacity:.4; cursor:default; }
+  /* ページを選んで書き出すモーダル */
+  .exp-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:10px; }
+  .exp-card{ border:2px solid var(--line); border-radius:10px; padding:6px 6px 4px; cursor:pointer; text-align:center; background:#fff; position:relative; transition:border-color .1s,background .1s; user-select:none; }
+  .exp-card:hover{ border-color:#93c5fd; }
+  .exp-card.sel{ border-color:var(--accent); background:#eff6ff; }
+  .exp-card canvas{ width:100%; height:auto; border-radius:6px; display:block; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.12); }
+  .exp-card .exp-num{ font-size:12px; font-weight:700; margin-top:5px; color:#374151; }
+  .exp-card .exp-check{ position:absolute; top:9px; left:9px; width:20px; height:20px; border-radius:6px; border:2px solid #cbd5e1; background:rgba(255,255,255,.9); display:flex; align-items:center; justify-content:center; font-size:13px; line-height:1; color:#fff; }
+  .exp-card.sel .exp-check{ background:var(--accent); border-color:var(--accent); }
   .ed-sub{ display:none; gap:6px; flex-wrap:wrap; align-items:center; margin-bottom:8px; border-radius:8px; padding:7px 10px; font-size:12px; }
   #ed-sel-panel{ background:#eaf5ff; border:1px solid #c4e2ff; }
   #ed-float-panel{ background:#fff6e5; border:1px solid #ffe0a3; }
@@ -2291,22 +2300,143 @@ $('#size-select').addEventListener('change', e => {
 function fileName(){ return ($('#title-input').value.trim() || 'design'); }
 
 function exportImage(fmt){
-  if (state.pages.length > 1 && confirm(`ページが ${state.pages.length} 枚あります。全ページをZIPでまとめてダウンロードしますか？\n\nOK＝全ページをZIPで保存\nキャンセル＝表示中のページだけ保存`)){
-    exportAllZip(fmt);
+  // 1ページだけならそのまま保存。複数ページなら「どのページを保存するか」を選ぶモーダルを出す
+  if (state.pages.length > 1){ openExportModal(fmt); return; }
+  exportPages(fmt, [0]);
+}
+
+/* 指定したページ番号（0始まり）の配列だけを書き出す。
+   1枚なら単体PNG/JPG、2枚以上なら選んだページだけZIPにまとめる */
+function exportPages(fmt, indices){
+  if (!indices.length) return;
+  const ext = fmt === 'jpg' ? 'jpg' : 'png';
+  const prevSel = state.selIds.slice(), prevPage = state.page;
+
+  if (indices.length === 1){
+    const i = indices[0];
+    state.page = i; state.selIds = [];
+    render();
+    const url = pageDataUrl(fmt);
+    const a = document.createElement('a');
+    const suffix = state.pages.length > 1 ? `_p${i + 1}` : '';
+    a.href = url;
+    a.download = `${fileName()}${suffix}.${ext}`;
+    a.click();
+    state.page = prevPage; state.selIds = prevSel;
+    render(); updatePageBar();
+    toast(`${fmt.toUpperCase()}画像を保存しました 🎉`);
     return;
   }
-  const prevSel = state.selIds.slice();
-  state.selIds = [];
-  render();
-  const url = pageDataUrl(fmt);
-  const a = document.createElement('a');
-  const suffix = state.pages.length > 1 ? `_p${state.page + 1}` : '';
-  a.href = url;
-  a.download = `${fileName()}${suffix}.${fmt === 'jpg' ? 'jpg' : 'png'}`;
-  a.click();
-  state.selIds = prevSel;
-  render();
-  toast(`${fmt.toUpperCase()}画像を保存しました 🎉`);
+
+  toast('選んだページをZIPにまとめています…');
+  setTimeout(() => {
+    const files = [];
+    indices.forEach(i => {
+      state.page = i; state.selIds = [];
+      render();
+      files.push({ name: `${fileName()}_p${String(i + 1).padStart(2, '0')}.${ext}`, data: dataUrlToU8(pageDataUrl(fmt)) });
+    });
+    state.page = prevPage; state.selIds = prevSel;
+    render(); updatePageBar();
+    const blob = makeZip(files);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${fileName()}_${indices.length}ページ.zip`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    toast(`${indices.length}ページ分の${fmt.toUpperCase()}をZIPで保存しました 🎉`);
+  }, 30);
+}
+
+/* 保存するページをサムネイルから選ぶモーダル */
+function openExportModal(fmt){
+  const old = document.getElementById('exp-modal');
+  if (old) old.remove();
+
+  const ov = document.createElement('div');
+  ov.className = 'ed-modal-backdrop';
+  ov.id = 'exp-modal';
+  ov.innerHTML =
+    '<div class="ed-modal" style="max-width:720px">' +
+      '<div class="ed-head">' +
+        '<div class="ed-title">⬇ ' + fmt.toUpperCase() + 'で保存するページを選ぶ</div>' +
+        '<div class="ed-actions"><button class="ed-btn" id="exp-cancel">✕ 閉じる</button></div>' +
+      '</div>' +
+      '<div class="ed-body" style="padding:16px">' +
+        '<div style="display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap">' +
+          '<button class="ed-btn" id="exp-all">全部えらぶ</button>' +
+          '<button class="ed-btn" id="exp-none">全部はずす</button>' +
+          '<button class="ed-btn" id="exp-cur">今のページだけ</button>' +
+        '</div>' +
+        '<div id="exp-grid" class="exp-grid"></div>' +
+      '</div>' +
+      '<div class="ed-head" style="position:sticky;bottom:0;top:auto;border-top:1px solid var(--line);border-bottom:none;justify-content:flex-end">' +
+        '<div class="ed-actions" style="align-items:center">' +
+          '<span id="exp-count" style="font-size:13px;color:#6b7280;margin-right:10px"></span>' +
+          '<button class="ed-btn primary" id="exp-go">⬇ 選んだページを保存</button>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(ov);
+
+  const grid = ov.querySelector('#exp-grid');
+  const selected = new Set([state.page]);   // 最初は表示中のページを選択
+
+  // サムネイルカードを作る
+  const cards = [];
+  state.pages.forEach((pg, i) => {
+    const card = document.createElement('div');
+    card.className = 'exp-card' + (selected.has(i) ? ' sel' : '');
+    const cvs = document.createElement('canvas');
+    const s = 120 / state.W;
+    cvs.width = Math.max(24, Math.round(state.W * s));
+    cvs.height = Math.max(24, Math.round(state.H * s));
+    const tc = cvs.getContext('2d');
+    tc.fillStyle = '#fff'; tc.fillRect(0, 0, cvs.width, cvs.height);
+    tc.scale(cvs.width / state.W, cvs.height / state.H);
+    drawBgTo(tc, pg.bg);
+    for (const l of pg.layers) drawLayer(tc, l);
+    const check = document.createElement('div');
+    check.className = 'exp-check';
+    check.textContent = selected.has(i) ? '✓' : '';
+    const num = document.createElement('div');
+    num.className = 'exp-num';
+    num.textContent = 'ページ ' + (i + 1) + (i === state.page ? '（表示中）' : '');
+    card.appendChild(check); card.appendChild(cvs); card.appendChild(num);
+    card.addEventListener('click', () => {
+      if (selected.has(i)) selected.delete(i); else selected.add(i);
+      refresh();
+    });
+    grid.appendChild(card);
+    cards.push({ card, check, i });
+  });
+
+  function refresh(){
+    cards.forEach(({ card, check, i }) => {
+      const on = selected.has(i);
+      card.classList.toggle('sel', on);
+      check.textContent = on ? '✓' : '';
+    });
+    const n = selected.size;
+    ov.querySelector('#exp-count').textContent = n === 0 ? 'ページを選んでください'
+      : (n === 1 ? '1枚を保存' : n + '枚をZIPで保存');
+    ov.querySelector('#exp-go').disabled = n === 0;
+  }
+
+  const close = () => ov.remove();
+  ov.querySelector('#exp-cancel').addEventListener('click', close);
+  ov.addEventListener('click', e => { if (e.target === ov) close(); });
+  ov.querySelector('#exp-all').addEventListener('click', () => { state.pages.forEach((_, i) => selected.add(i)); refresh(); });
+  ov.querySelector('#exp-none').addEventListener('click', () => { selected.clear(); refresh(); });
+  ov.querySelector('#exp-cur').addEventListener('click', () => { selected.clear(); selected.add(state.page); refresh(); });
+  ov.querySelector('#exp-go').addEventListener('click', () => {
+    const indices = [...selected].sort((a, b) => a - b);
+    if (!indices.length) return;
+    close();
+    exportPages(fmt, indices);
+  });
+
+  refresh();
 }
 /* いま cv に描かれているページを dataURL に（jpg は白背景を敷く） */
 function pageDataUrl(fmt){
