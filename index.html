@@ -151,6 +151,9 @@
   .page-thumb:hover{ border-color:#b9a8e8; }
   .page-thumb.current{ border-color:var(--accent); box-shadow:0 0 0 2px #e4daff; }
   .page-thumb.drop-target{ border-color:#22c55e; box-shadow:0 0 0 3px #bbf7d0; transform:translateY(-3px); }
+  .page-thumb.dragging{ opacity:.4; }
+  .page-thumb{ cursor:grab; }
+  .page-thumb:active{ cursor:grabbing; }
   .page-thumb canvas{ display:block; }
   .page-thumb .pnum{
     position:absolute; left:3px; top:2px; font-size:10px; background:rgba(0,0,0,.55);
@@ -1213,6 +1216,7 @@ function delPage(){
 }
 let _pgTm;
 function schedulePageBar(){ clearTimeout(_pgTm); _pgTm = setTimeout(updatePageBar, 250); }
+let _pageDragFrom = null;   // ページ並べ替えドラッグ中の元インデックス
 function updatePageBar(){
   const box = $('#page-thumbs');
   if (!box) return;
@@ -1234,10 +1238,43 @@ function updatePageBar(){
     n.className = 'pnum';
     n.textContent = i + 1;
     d.appendChild(n);
-    d.title = `ページ${i + 1}へ`;
-    d.addEventListener('click', () => switchPage(i));
+    d.title = `ページ${i + 1}へ（ドラッグで並べ替え）`;
+    d.addEventListener('click', () => { if (_pageDragFrom == null) switchPage(i); });
+    // ---- ドラッグして順番を入れ替え ----
+    d.draggable = true;
+    d.addEventListener('dragstart', e => {
+      _pageDragFrom = i;
+      d.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', String(i)); } catch (_) {}
+    });
+    d.addEventListener('dragover', e => {
+      if (_pageDragFrom == null) return;   // レイヤーのドラッグ等は無視
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      document.querySelectorAll('.page-thumb').forEach(t => t.classList.toggle('drop-target', t === d && i !== _pageDragFrom));
+    });
+    d.addEventListener('drop', e => {
+      if (_pageDragFrom == null) return;
+      e.preventDefault();
+      movePage(_pageDragFrom, i);
+    });
+    d.addEventListener('dragend', () => {
+      _pageDragFrom = null;
+      document.querySelectorAll('.page-thumb').forEach(t => t.classList.remove('drop-target', 'dragging'));
+    });
     box.appendChild(d);
   });
+}
+/* ページの並べ替え：from の位置のページを to の位置へ移動 */
+function movePage(from, to){
+  if (from == null || to == null || from === to) return;
+  const curPg = state.pages[state.page];      // いま見ているページを覚えておく
+  const [pg] = state.pages.splice(from, 1);
+  state.pages.splice(to, 0, pg);
+  state.page = clamp(state.pages.indexOf(curPg), 0, state.pages.length - 1);
+  render(); updatePageBar(); pushHistory();
+  toast('ページを並べ替えました（Ctrl+Zで戻せます）');
 }
 $('#page-add').addEventListener('click', addPage);
 $('#page-dup').addEventListener('click', dupPage);
@@ -2305,25 +2342,36 @@ function exportImage(fmt){
   exportPages(fmt, [0]);
 }
 
+/* ダウンロードを確実に発火させる共通処理。
+   アンカーを一度DOMに入れてからクリックする（入れないと発火しないブラウザがある）。
+   data: URL より Blob URL の方が大きい画像でも確実なので Blob を使う */
+function downloadBlob(blob, filename){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 5000);
+}
+
 /* 指定したページ番号（0始まり）の配列だけを書き出す。
    1枚なら単体PNG/JPG、2枚以上なら選んだページだけZIPにまとめる */
 function exportPages(fmt, indices){
   if (!indices.length) return;
   const ext = fmt === 'jpg' ? 'jpg' : 'png';
+  const mime = fmt === 'jpg' ? 'image/jpeg' : 'image/png';
   const prevSel = state.selIds.slice(), prevPage = state.page;
 
   if (indices.length === 1){
     const i = indices[0];
     state.page = i; state.selIds = [];
     render();
-    const url = pageDataUrl(fmt);
-    const a = document.createElement('a');
-    const suffix = state.pages.length > 1 ? `_p${i + 1}` : '';
-    a.href = url;
-    a.download = `${fileName()}${suffix}.${ext}`;
-    a.click();
+    const u8 = dataUrlToU8(pageDataUrl(fmt));
     state.page = prevPage; state.selIds = prevSel;
     render(); updatePageBar();
+    const suffix = state.pages.length > 1 ? `_p${i + 1}` : '';
+    downloadBlob(new Blob([u8], { type: mime }), `${fileName()}${suffix}.${ext}`);
     toast(`${fmt.toUpperCase()}画像を保存しました 🎉`);
     return;
   }
@@ -2338,12 +2386,7 @@ function exportPages(fmt, indices){
     });
     state.page = prevPage; state.selIds = prevSel;
     render(); updatePageBar();
-    const blob = makeZip(files);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `${fileName()}_${indices.length}ページ.zip`;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    downloadBlob(makeZip(files), `${fileName()}_${indices.length}ページ.zip`);
     toast(`${indices.length}ページ分の${fmt.toUpperCase()}をZIPで保存しました 🎉`);
   }, 30);
 }
